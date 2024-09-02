@@ -1,0 +1,396 @@
+---
+title: "Prediction of influence scores of scientific journals"
+author: "Saad Elnaem"
+date: "2024-04-12"
+output:
+  pdf_document: default
+  beamer_presentation: default
+  powerpoint_presentation: default
+  slidy_presentation: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Data Description
+
+- **File 1: api_journal11-13-17.csv:**
+
+1.Issn: The International Standard Serial Number of the publication.
+
+2.Journal-name: The name of the scientific journal.
+
+3.Pub_name: The name of the publisher.
+
+4.Is_hybrid: Electronic and printed versions of journal (1); only electronic version of journal (0).
+
+5.category: The category or scientific field of the journal.
+
+6.URL: The web page address of the journal.
+
+
+- **File 2: api_price11-13-17.csv:**
+
+1.id: Observation id.
+
+2.price: The subscription’s price.
+
+3.date_stamp: The date in which in the information was collected.
+
+4.Journal_id: The International Standard Serial Number of the publication.
+
+5.Influence_id: The influence Id.
+
+6.URL: The web page address of the journal.
+
+7.license: Rights for publication, distribution, and use of research.
+
+
+- **File 3: estimated-article-influence-scores-201.csv:**
+
+1.Journal_name: The name of the scientific journal.
+
+2.issn: The International Standard Serial Number of the publication.
+
+3.Citation_count_sum: The total number of citations of journal.
+
+4.Paper_count_sum: The total number of papers published by the journal.
+
+5.Avg_cites_per_paper: The average number of citations per paper.
+
+6.Proj_ai: The projected article influence. The higher the influence, the better the scientific credibility of the journal.
+
+7.Proj_ai_year: The year of projected article influence.
+
+
+## Loading Libraries
+
+```{r libraries, echo=TRUE, results='hide', message=FALSE, warning=FALSE}
+
+library(dplyr)
+
+library(Hmisc)
+
+library(tidymodels)
+
+library(caret)
+
+library(bruceR)
+
+library(randomForest)
+
+library(rpart)
+
+```
+
+## Reading the data files
+
+```{r read_data, echo = TRUE, include=TRUE}
+
+journalDB <- read.csv("api_journal11-13-17.csv")  
+
+head(journalDB)
+
+priceDB <- read.csv("api_price11-13-17.csv")  
+
+head(priceDB)
+
+scoresDB <- read.csv("estimated-article-influence-scores-2015.csv")  
+
+head(scoresDB)
+
+```
+
+
+## Join the data files 
+
+```{r join_data, echo=TRUE, include=TRUE}
+
+describe(scoresDB$issn)
+
+describe(priceDB$journal_id)
+
+describe(journalDB$issn)
+
+priceDB <- priceDB %>% distinct(journal_id, .keep_all = TRUE)
+
+joinDB <- inner_join(scoresDB, journalDB, by="issn")
+
+joinDB <- inner_join(joinDB, priceDB, by=c("issn"= "journal_id"))
+
+```
+
+
+
+## Understand the final data after join
+
+```{r final_joined, echo=TRUE, include=TRUE}
+
+glimpse(joinDB)
+
+
+```
+
+## Handling the data columns
+
+```{r delete_columns, include=TRUE}
+
+# Delete column x
+
+joinDB <- joinDB[ ,-1]
+
+
+# The column has one value, 2015, it is not effective in the ML model
+
+joinDB <- select(joinDB, -("proj_ai_year"))
+
+
+# The columns of journal names have 3169 and 3174 unique categorical values, it is very challenging to be converted   to interpretative values by techniques like one-hot or binning.
+
+joinDB <- select(joinDB, -("journal_name.x"))
+
+joinDB <- select(joinDB, -("journal_name.y"))
+
+
+# The publisher name has no missing values but with 601 unique categorical values it is very challenging to be      converted to interpretative values by techniques like one-hot or binning.
+
+joinDB <- select(joinDB, -("pub_name"))
+
+
+# The column contains 545 missing value and cant be imputed.
+
+joinDB <- select(joinDB, -("category"))
+
+
+# The columns contain 2172 and 927 missing values plus it can't be converted to interpretative values for the model.
+
+joinDB <- select(joinDB, -("url.x"))
+
+joinDB <- select(joinDB, -("url.y"))
+
+
+# The issn column used as our id column to join the tables, so they will be dropped.
+
+joinDB <- select(joinDB, -("id"))
+
+joinDB <- select(joinDB, -("influence_id"))
+
+
+# The column contains 917 missing values
+
+joinDB <- select(joinDB, -("date_stamp"))
+
+
+# Most of the column is missed, 5155.
+
+joinDB <- select(joinDB, -("license"))
+
+
+# Delete column issn
+
+joinDB <- select(joinDB, -("issn"))
+
+
+# The column will be converted to factor as it represent categorical values, printed and electronic.
+
+joinDB$is_hybrid <- factor(joinDB$is_hybrid)
+
+```
+
+
+## Data checking
+
+Finding if there is duplicates or missed values
+
+```{r check data, echo=TRUE}
+
+any(is.na(joinDB))
+
+#  Deleting the missing 4 rows from proj_ai
+
+joinDB <- na.omit(joinDB)
+
+any(is.na(joinDB))
+
+```
+
+## Moving is_hybrid to the end
+
+Move the is_hybrid column to the end to gather all numeric columns together for transforming.
+
+```{r relocate, echo=TRUE}
+
+joinDB <- joinDB %>% relocate("is_hybrid", .after = "price")
+
+glimpse(joinDB)
+
+```
+
+
+## Data Transforming - Scaler
+
+Transform all numeric values using min-max method.  
+
+```{r Z-score, echo=TRUE}
+
+joinDB[ ,1:5] <- scaler(joinDB[ ,1:5])
+
+head(joinDB)
+
+```
+
+
+## Final data summary
+
+```{r final data transformed, echo=TRUE}
+
+dim(joinDB)
+
+glimpse(joinDB)
+
+```
+
+## Split Data
+
+```{r split data, echo=TRUE}
+
+set.seed(123)
+
+joinDB_split <- initial_split(joinDB, prop = 0.80, strata = proj_ai)
+
+joinDB_train <- joinDB_split %>% training()
+
+joinDB_test <- joinDB_split %>% testing()
+
+```
+
+## Model_01 : Linear Model
+
+```{r model1, echo=TRUE}
+
+model_01 <- lm(proj_ai ~ ., data = joinDB_train)
+
+model_01
+
+predictions_01 <- predict(model_01, joinDB_test)
+
+RMSE_value_01 <- RMSE(joinDB_test$proj_ai, predictions_01)
+
+RMSE_value_01
+
+```
+
+## Model_02 : logistic Regression using cross validation
+
+- Using 10 folds to train the model.
+
+```{r model2, echo=TRUE}
+
+set.seed(123)
+
+training_parameter <- trainControl(method = "cv", number = 10)
+
+model_02 <- train(proj_ai ~ ., data = joinDB_train, family = binomial, method = "glm", trControl = training_parameter)
+
+model_02
+
+predictions_02 <- predict(model_02, joinDB_test)
+
+RMSE_value_02 <- RMSE(joinDB_test$proj_ai, predictions_02)
+
+RMSE_value_02
+
+```
+
+
+## Model_03 : Random Forest using hyper-parameter tuning
+
+- Find the best result for different parameters, in this case parameter "mtry" controls the number of variables randomly sampled as candidates at each split when building each tree in the forest. Then apply it to the model training process.
+
+```{r model3, echo=TRUE}
+
+grid_tuning <- expand.grid(mtry = c(2, 5))
+
+model_fit <- train(proj_ai ~ ., data = joinDB_train, method = "rf", tuneGrid = grid_tuning)
+
+model_fit
+
+
+best_mtry <- model_fit$bestTune$mtry
+
+best_mtry 
+
+
+model_03 <- train(proj_ai ~ ., data = joinDB_train, method = "rf", tuneGrid = expand.grid(mtry = best_mtry))
+
+model_03
+
+predictions_03 <- predict(model_03, joinDB_test)
+
+RMSE_value_03 <- RMSE(joinDB_test$proj_ai, predictions_03)
+
+RMSE_value_03
+
+```
+
+## Model_04 : Random Forest without hyper-parameter tuning
+
+```{r model4, echo=TRUE}
+
+model_04 <- randomForest(proj_ai ~ ., data = joinDB_train)
+
+model_04
+
+predictions_04 <- predict(model_04, joinDB_test)
+
+RMSE_value_04 <- RMSE(joinDB_test$proj_ai, predictions_04)
+
+RMSE_value_04
+
+```
+
+
+## Model_05 : Decision Tree
+
+```{r model5, echo=TRUE}
+
+model_05 <- rpart(proj_ai ~ ., data = joinDB_train)
+
+model_05
+
+predictions_05 <- predict(model_04, joinDB_test)
+
+RMSE_value_05 <- RMSE(joinDB_test$proj_ai, predictions_04)
+
+RMSE_value_05
+
+```
+
+
+## Analysis and results
+
+- The hyper-parameter tuning improved the Random forest model.
+
+- The result from the Random forest and the Decision tree algorithms is the same in case of no hyper-parameter tuning. this indicate how much they are related. Random forest is an ensemble learning method that builds multiple decision trees. 
+
+- Based on the results, the model with best performance is: Random Forest using hyper-parameter tuning, with the lowest RMSE.
+
+```{r results, echo=FALSE}
+
+cat("RMSE for Linear regression model is:", RMSE_value_01)
+
+cat("RMSE for Logistic Regression using cross validation is:", RMSE_value_02)
+
+cat("RMSE for Random Forest using hyper-parameter tuning is:", RMSE_value_03)
+
+cat("RMSE for Random Forest without hyper-parameter tuning is:", RMSE_value_04)
+
+cat("RMSE for Decision Tree is:", RMSE_value_05)
+
+```
+ 
+
+
+
